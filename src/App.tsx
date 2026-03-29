@@ -74,6 +74,7 @@ interface User {
   companyId: string;
   department?: string;
   ruleId?: string;
+  password?: string;
 }
 
 interface Company {
@@ -137,10 +138,14 @@ const MOCK_COMPANY: Company = {
 
 const MOCK_USERS: User[] = [
   { id: 'u-1', name: 'Alice Admin', email: 'alice@acme.com', role: 'Admin', companyId: 'comp-1' },
-  { id: 'u-2', name: 'Bob Manager', email: 'bob@acme.com', role: 'Manager', directorId: 'u-5', companyId: 'comp-1' },
+  { id: 'u-2', name: 'Bob Manager', email: 'bob@acme.com', role: 'Manager', companyId: 'comp-1' },
   { id: 'u-3', name: 'Charlie Employee', email: 'charlie@acme.com', role: 'Employee', managerId: 'u-2', companyId: 'comp-1', department: 'Engineering' },
   { id: 'u-4', name: 'Diana Finance', email: 'diana@acme.com', role: 'Finance', companyId: 'comp-1' },
-  { id: 'u-5', name: 'Edward Director', email: 'edward@acme.com', role: 'Director', companyId: 'comp-1' },
+  { id: 'u-5', name: 'Frank Manager', email: 'manager1@acme.com', role: 'Manager', companyId: 'comp-1', department: 'Operations' },
+  { id: 'u-6', name: 'Grace Manager', email: 'manager2@acme.com', role: 'Manager', companyId: 'comp-1', department: 'Product' },
+  { id: 'u-7', name: 'Henry Employee', email: 'emp1@acme.com', role: 'Employee', managerId: 'u-5', companyId: 'comp-1', department: 'Engineering' },
+  { id: 'u-8', name: 'Ivy Employee', email: 'emp2@acme.com', role: 'Employee', managerId: 'u-5', companyId: 'comp-1', department: 'Sales' },
+  { id: 'u-9', name: 'Jack Employee', email: 'emp3@acme.com', role: 'Employee', managerId: 'u-6', companyId: 'comp-1', department: 'Support' },
 ];
 
 const MOCK_EXPENSES: Expense[] = [
@@ -731,13 +736,39 @@ export default function App() {
     }
   }, [view, user]);
 
-  // Mock Login
+  // Mock Login (Role based simulation)
   const handleLogin = (role: Role) => {
-    // In a real app, this would be an API call
     const mockUser = MOCK_USERS.find(u => u.role === role) || MOCK_USERS[2];
     setUser(mockUser);
     setView('Dashboard');
     setActiveTab('Overview');
+  };
+
+  const handleRealLogin = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
+    const { email, password } = Object.fromEntries(formData.entries());
+    
+    setIsLoading(true);
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      if (res.ok) {
+        const userData = await res.json();
+        setUser(userData);
+        setView('Dashboard');
+        setActiveTab('Overview');
+      } else {
+        alert("Invalid email or password");
+      }
+    } catch (error) {
+      console.error("Login failed:", error);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleLogout = () => {
@@ -945,24 +976,66 @@ export default function App() {
           </div>
 
           <Card className="p-8">
-            <h2 className="text-xl font-semibold mb-6 text-center">Select Prototype Role</h2>
-            <div className="space-y-3">
+            <h2 className="text-xl font-semibold mb-6 text-center">Login to your Account</h2>
+            
+            <form onSubmit={handleRealLogin} className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Email Address</label>
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <input 
+                    name="email"
+                    type="email" 
+                    placeholder="name@company.com" 
+                    className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 transition-all outline-none"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Password</label>
+                <div className="relative">
+                  <ShieldCheck className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <input 
+                    name="password"
+                    type="password" 
+                    placeholder="••••••••" 
+                    className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 transition-all outline-none"
+                    required
+                  />
+                </div>
+              </div>
+
+              <button 
+                type="submit"
+                disabled={isLoading}
+                className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 disabled:opacity-50"
+              >
+                {isLoading ? 'Signing in...' : 'Sign In'}
+              </button>
+            </form>
+
+            <div className="relative my-8">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-100"></div>
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-white px-2 text-slate-500 font-bold">Or Simulation Login</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3">
               {(['Admin', 'Manager', 'Employee'] as Role[]).map((role) => (
                 <button
                   key={role}
                   onClick={() => handleLogin(role)}
-                  className="w-full flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-indigo-600 hover:bg-indigo-50 transition-all group"
+                  className="flex flex-col items-center gap-2 p-3 rounded-xl border border-slate-100 hover:border-indigo-600 hover:bg-indigo-50 transition-all group"
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center group-hover:bg-indigo-100">
-                      {role === 'Admin' ? <Settings size={20} /> : role === 'Manager' ? <Users size={20} /> : <FileText size={20} />}
-                    </div>
-                    <div className="text-left">
-                      <p className="font-semibold text-slate-900">{role}</p>
-                      <p className="text-xs text-slate-500">Access {role.toLowerCase()} features</p>
-                    </div>
+                  <div className="w-10 h-10 rounded-full bg-slate-50 flex items-center justify-center group-hover:bg-indigo-100 text-slate-500 group-hover:text-indigo-600 transition-colors">
+                    {role === 'Admin' ? <Settings size={18} /> : role === 'Manager' ? <Users size={18} /> : <FileText size={18} />}
                   </div>
-                  <ChevronRight className="text-slate-400 group-hover:text-indigo-600" size={20} />
+                  <span className="text-[10px] font-bold text-slate-600 group-hover:text-indigo-600">{role}</span>
                 </button>
               ))}
             </div>
