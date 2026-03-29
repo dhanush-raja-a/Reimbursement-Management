@@ -2,99 +2,54 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
-import Database from "better-sqlite3";
+import mysql from "mysql2/promise";
 import cors from "cors";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new Database("reimbursements.db");
+// --- MySQL Database Connection ---
+const pool = mysql.createPool({
+  host: 'localhost',
+  user: 'user',
+  password: 'root',
+  database: 'odoo_reimbursement',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+});
 
-// --- Database Initialization ---
-db.exec(`
-  CREATE TABLE IF NOT EXISTS companies (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    default_currency TEXT NOT NULL,
-    country TEXT NOT NULL
-  );
+// Helper to map DB row to CamelCase for Frontend
+function mapUser(u: any) {
+  if (!u) return u;
+  return {
+    ...u,
+    companyId: u.company_id,
+    managerId: u.manager_id,
+    directorId: u.director_id,
+    password: u.password,
+  };
+}
 
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    email TEXT UNIQUE NOT NULL,
-    role TEXT NOT NULL,
-    manager_id TEXT,
-    company_id TEXT NOT NULL,
-    department TEXT,
-    FOREIGN KEY (company_id) REFERENCES companies(id)
-  );
+function mapExpense(e: any) {
+  if (!e) return e;
+  const dateStr = e.date instanceof Date ? e.date.toISOString().split('T')[0] : e.date;
+  return {
+    ...e,
+    date: dateStr,
+    employeeId: e.employee_id,
+    baseAmount: e.base_amount,
+    receiptUrl: e.receipt_url,
+    currentStep: e.current_step,
+  };
+}
 
-  CREATE TABLE IF NOT EXISTS expenses (
-    id TEXT PRIMARY KEY,
-    employee_id TEXT NOT NULL,
-    amount REAL NOT NULL,
-    currency TEXT NOT NULL,
-    base_amount REAL NOT NULL,
-    category TEXT NOT NULL,
-    description TEXT,
-    date TEXT NOT NULL,
-    status TEXT DEFAULT 'Pending',
-    receipt_url TEXT,
-    current_step INTEGER DEFAULT 0,
-    FOREIGN KEY (employee_id) REFERENCES users(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS approval_rules (
-    id TEXT PRIMARY KEY,
-    company_id TEXT NOT NULL,
-    steps_json TEXT NOT NULL,
-    FOREIGN KEY (company_id) REFERENCES companies(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS approval_logs (
-    id TEXT PRIMARY KEY,
-    expense_id TEXT NOT NULL,
-    approver_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    status TEXT NOT NULL,
-    comment TEXT,
-    date TEXT NOT NULL,
-    FOREIGN KEY (expense_id) REFERENCES expenses(id),
-    FOREIGN KEY (approver_id) REFERENCES users(id)
-  );
-`);
-
-// --- Seed Data (if empty) ---
-const companyCount = db.prepare("SELECT count(*) as count FROM companies").get() as { count: number };
-if (companyCount.count === 0) {
-  db.prepare("INSERT INTO companies (id, name, default_currency, country) VALUES (?, ?, ?, ?)").run(
-    "comp-1", "Acme Corp", "USD", "United States"
-  );
-  
-  const users = [
-    ["u-1", "Alice Admin", "alice@acme.com", "Admin", null, "comp-1", "Administration"],
-    ["u-2", "Bob Manager", "bob@acme.com", "Manager", null, "comp-1", "Engineering"],
-    ["u-3", "Charlie Employee", "charlie@acme.com", "Employee", "u-2", "comp-1", "Engineering"],
-    ["u-4", "Diana Finance", "diana@acme.com", "Finance", null, "comp-1", "Finance"],
-  ];
-  
-  const insertUser = db.prepare("INSERT INTO users (id, name, email, role, manager_id, company_id, department) VALUES (?, ?, ?, ?, ?, ?, ?)");
-  users.forEach(u => insertUser.run(...u));
-
-  db.prepare("INSERT INTO approval_rules (id, company_id, steps_json) VALUES (?, ?, ?)").run(
-    "r-1", "comp-1", JSON.stringify({
-      id: "r-1",
-      name: "Standard Approval",
-      description: "Default approval flow",
-      flowType: "Sequential",
-      isManagerApproverAtStart: true,
-      steps: [
-        { role: "Manager", isManagerApprover: true, isRequired: true },
-        { role: "Finance", isManagerApprover: false, percentageRequired: 100, isRequired: true }
-      ]
-    })
-  );
+function mapCompany(c: any) {
+  if (!c) return c;
+  return {
+    ...c,
+    defaultCurrency: c.default_currency,
+  };
 }
 
 async function startServer() {
@@ -106,23 +61,41 @@ async function startServer() {
 
   // --- API Routes ---
 
-  app.post("/api/signup", (req, res) => {
+  app.post("/api/login", async (req, res) => {
+    const { email, password } = req.body;
+    console.log("Login attempt:", { email, password });
+    try {
+      const [users] = await pool.execute("SELECT * FROM users WHERE email = ? AND password = ?", [email, password]) as any[];
+      const user = users[0];
+      if (user) {
+        res.json(mapUser(user));
+      } else {
+        res.status(401).json({ error: "Invalid credentials" });
+      }
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/signup", async (req, res) => {
     const { companyName, country, defaultCurrency, adminName, adminEmail } = req.body;
     const companyId = `comp-${Date.now()}`;
     const adminId = `u-${Date.now()}`;
 
-    db.prepare("INSERT INTO companies (id, name, default_currency, country) VALUES (?, ?, ?, ?)").run(
-      companyId, companyName, defaultCurrency, country
-    );
+    try {
+      await pool.execute(
+        "INSERT INTO companies (id, name, default_currency, country) VALUES (?, ?, ?, ?)",
+        [companyId, companyName, defaultCurrency, country]
+      );
 
-    db.prepare("INSERT INTO users (id, name, email, role, company_id, department) VALUES (?, ?, ?, ?, ?, ?)").run(
-      adminId, adminName, adminEmail, "Admin", companyId, "Administration"
-    );
+      await pool.execute(
+        "INSERT INTO users (id, name, email, role, company_id, department) VALUES (?, ?, ?, ?, ?, ?)",
+        [adminId, adminName, adminEmail, "Admin", companyId, "Administration"]
+      );
 
-    // Default rules
-    const ruleId = `r-${Date.now()}`;
-    db.prepare("INSERT INTO approval_rules (id, company_id, steps_json) VALUES (?, ?, ?)").run(
-      ruleId, companyId, JSON.stringify({
+      // Default rules
+      const ruleId = `r-${Date.now()}`;
+      const defaultRule = {
         id: ruleId,
         name: "Default Approval",
         description: "Initial approval flow",
@@ -132,155 +105,254 @@ async function startServer() {
           { role: "Manager", isManagerApprover: true, isRequired: true },
           { role: "Finance", isManagerApprover: false, isRequired: true }
         ]
-      })
-    );
+      };
 
-    res.json({ companyId, adminId, role: "Admin" });
+      await pool.execute(
+        "INSERT INTO approval_rules (id, company_id, steps_json) VALUES (?, ?, ?)",
+        [ruleId, companyId, JSON.stringify(defaultRule)]
+      );
+
+      res.json({ companyId, adminId, role: "Admin" });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
-  app.get("/api/company/:id", (req, res) => {
-    const company = db.prepare("SELECT * FROM companies WHERE id = ?").get(req.params.id);
-    const rules = db.prepare("SELECT * FROM approval_rules WHERE company_id = ?").all(req.params.id);
-    res.json({ ...company, rules: rules.map(r => JSON.parse(r.steps_json)) });
+  app.get("/api/company/:id", async (req, res) => {
+    try {
+      const [companies] = await pool.execute("SELECT * FROM companies WHERE id = ?", [req.params.id]) as any[];
+      const company = companies[0];
+      if (!company) return res.status(404).json({ error: "Company not found" });
+
+      const [rules] = await pool.execute("SELECT * FROM approval_rules WHERE company_id = ?", [req.params.id]) as any[];
+      res.json({ 
+        ...mapCompany(company), 
+        rules: rules.map((r: any) => typeof r.steps_json === 'string' ? JSON.parse(r.steps_json) : r.steps_json) 
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
-  app.put("/api/approval-rules", (req, res) => {
+  app.put("/api/approval-rules", async (req, res) => {
     const { companyId, rules } = req.body;
-    // Clear existing rules and insert new ones
-    db.prepare("DELETE FROM approval_rules WHERE company_id = ?").run(companyId);
-    const insert = db.prepare("INSERT INTO approval_rules (id, company_id, steps_json) VALUES (?, ?, ?)");
-    rules.forEach((rule: any) => {
-      insert.run(rule.id, companyId, JSON.stringify(rule));
-    });
-    res.json({ success: true });
+    try {
+      await pool.execute("DELETE FROM approval_rules WHERE company_id = ?", [companyId]);
+      for (const rule of rules) {
+        await pool.execute(
+          "INSERT INTO approval_rules (id, company_id, steps_json) VALUES (?, ?, ?)",
+          [rule.id, companyId, JSON.stringify(rule)]
+        );
+      }
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
-  app.post("/api/users", (req, res) => {
+  app.post("/api/users", async (req, res) => {
     const { name, email, role, managerId, companyId, department } = req.body;
     const id = `u-${Date.now()}`;
     try {
-      db.prepare("INSERT INTO users (id, name, email, role, manager_id, company_id, department) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-        id, name, email, role, managerId || null, companyId, department
+      await pool.execute(
+        "INSERT INTO users (id, name, email, role, manager_id, company_id, department) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [id, name, email, role, managerId || null, companyId, department]
       );
-      res.json({ id, name, email, role });
+      res.json({ id, name, email, role, managerId, companyId, department });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  app.get("/api/users", (req, res) => {
+  app.get("/api/users", async (req, res) => {
     const { companyId, managerId } = req.query;
-    let users;
-    if (companyId) {
-      users = db.prepare("SELECT * FROM users WHERE company_id = ?").all(companyId);
-    } else if (managerId) {
-      users = db.prepare("SELECT * FROM users WHERE manager_id = ?").all(managerId);
-    } else {
-      users = db.prepare("SELECT * FROM users").all();
+    try {
+      let users: any[];
+      if (companyId) {
+        [users] = await pool.execute("SELECT * FROM users WHERE company_id = ?", [companyId]) as any[];
+      } else if (managerId) {
+        [users] = await pool.execute("SELECT * FROM users WHERE manager_id = ?", [managerId]) as any[];
+      } else {
+        [users] = await pool.execute("SELECT * FROM users") as any[];
+      }
+      res.json(users.map(mapUser));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
-    res.json(users);
   });
 
-  app.get("/api/expenses", (req, res) => {
+  app.get("/api/expenses", async (req, res) => {
     const { employeeId, managerId } = req.query;
-    let expenses;
-    if (employeeId) {
-      expenses = db.prepare("SELECT e.*, u.name as employeeName FROM expenses e JOIN users u ON e.employee_id = u.id WHERE e.employee_id = ?").all(employeeId);
-    } else if (managerId) {
-      expenses = db.prepare("SELECT e.*, u.name as employeeName FROM expenses e JOIN users u ON e.employee_id = u.id WHERE u.manager_id = ?").all(managerId);
-    } else {
-      expenses = db.prepare("SELECT e.*, u.name as employeeName FROM expenses e JOIN users u ON e.employee_id = u.id").all();
+    try {
+      let expenses: any[];
+      if (employeeId) {
+        [expenses] = await pool.execute(
+          "SELECT e.*, u.name as employeeName FROM expenses e JOIN users u ON e.employee_id = u.id WHERE e.employee_id = ?",
+          [employeeId]
+        ) as any[];
+      } else if (managerId) {
+        [expenses] = await pool.execute(
+          "SELECT e.*, u.name as employeeName FROM expenses e JOIN users u ON e.employee_id = u.id WHERE u.manager_id = ?",
+          [managerId]
+        ) as any[];
+      } else {
+        [expenses] = await pool.execute(
+          "SELECT e.*, u.name as employeeName FROM expenses e JOIN users u ON e.employee_id = u.id"
+        ) as any[];
+      }
+      res.json(expenses.map(mapExpense));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
-    res.json(expenses);
   });
 
-  app.post("/api/expenses", (req, res) => {
+  app.post("/api/expenses", async (req, res) => {
     const { employeeId, amount, currency, baseAmount, category, description, date } = req.body;
     const id = `e-${Date.now()}`;
-    db.prepare(`
-      INSERT INTO expenses (id, employee_id, amount, currency, base_amount, category, description, date, status, current_step)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Pending', 0)
-    `).run(id, employeeId, amount, currency, baseAmount, category, description, date);
-    res.json({ id, status: 'Pending' });
-  });
-
-  app.get("/api/stats", (req, res) => {
-    const { employeeId, managerId, companyId } = req.query;
-    let stats;
-    if (employeeId) {
-      stats = db.prepare(`
-        SELECT 
-          SUM(CASE WHEN status = 'Approved' THEN base_amount ELSE 0 END) as totalSpent,
-          SUM(CASE WHEN status = 'Pending' THEN base_amount ELSE 0 END) as totalPending,
-          SUM(CASE WHEN status = 'Rejected' THEN base_amount ELSE 0 END) as totalRejected,
-          COUNT(*) as totalCount
-        FROM expenses 
-        WHERE employee_id = ?
-      `).get(employeeId);
-    } else if (managerId) {
-      stats = db.prepare(`
-        SELECT 
-          SUM(CASE WHEN e.status = 'Approved' THEN e.base_amount ELSE 0 END) as totalSpent,
-          SUM(CASE WHEN e.status = 'Pending' THEN e.base_amount ELSE 0 END) as totalPending,
-          SUM(CASE WHEN e.status = 'Rejected' THEN e.base_amount ELSE 0 END) as totalRejected,
-          COUNT(*) as totalCount
-        FROM expenses e
-        JOIN users u ON e.employee_id = u.id
-        WHERE u.manager_id = ?
-      `).get(managerId);
-    } else if (companyId) {
-      stats = db.prepare(`
-        SELECT 
-          SUM(CASE WHEN e.status = 'Approved' THEN e.base_amount ELSE 0 END) as totalSpent,
-          SUM(CASE WHEN e.status = 'Pending' THEN e.base_amount ELSE 0 END) as totalPending,
-          SUM(CASE WHEN e.status = 'Rejected' THEN e.base_amount ELSE 0 END) as totalRejected,
-          COUNT(*) as totalCount
-        FROM expenses e
-        JOIN users u ON e.employee_id = u.id
-        WHERE u.company_id = ?
-      `).get(companyId);
+    try {
+      await pool.execute(
+        "INSERT INTO expenses (id, employee_id, amount, currency, base_amount, category, description, date, status, current_step) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Pending', 0)",
+        [id, employeeId, amount, currency, baseAmount, category, description, date]
+      );
+      res.json({ id, status: 'Pending' });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
-    res.json(stats || { totalSpent: 0, totalPending: 0, totalRejected: 0, totalCount: 0 });
   });
 
-  app.get("/api/approvals/pending", (req, res) => {
-    const { role, userId } = req.query;
-    // Simplified logic: find expenses where the current step matches the role
-    // In a real app, we'd check the rules engine
-    const expenses = db.prepare(`
-      SELECT e.*, u.name as employeeName 
-      FROM expenses e 
-      JOIN users u ON e.employee_id = u.id 
-      WHERE e.status = 'Pending'
-    `).all();
-    res.json(expenses);
+  app.get("/api/stats", async (req, res) => {
+    const { employeeId, managerId, companyId } = req.query;
+    try {
+      let stats: any;
+      if (employeeId) {
+        const [rows] = await pool.execute(`
+          SELECT 
+            SUM(CASE WHEN status = 'Approved' THEN base_amount ELSE 0 END) as totalSpent,
+            SUM(CASE WHEN status = 'Pending' THEN base_amount ELSE 0 END) as totalPending,
+            SUM(CASE WHEN status = 'Rejected' THEN base_amount ELSE 0 END) as totalRejected,
+            COUNT(*) as totalCount
+          FROM expenses 
+          WHERE employee_id = ?
+        `, [employeeId]) as any[];
+        stats = rows[0];
+      } else if (managerId) {
+        const [rows] = await pool.execute(`
+          SELECT 
+            SUM(CASE WHEN e.status = 'Approved' THEN e.base_amount ELSE 0 END) as totalSpent,
+            SUM(CASE WHEN e.status = 'Pending' THEN e.base_amount ELSE 0 END) as totalPending,
+            SUM(CASE WHEN e.status = 'Rejected' THEN e.base_amount ELSE 0 END) as totalRejected,
+            COUNT(*) as totalCount
+          FROM expenses e
+          JOIN users u ON e.employee_id = u.id
+          WHERE u.manager_id = ?
+        `, [managerId]) as any[];
+        stats = rows[0];
+      } else if (companyId) {
+        const [rows] = await pool.execute(`
+          SELECT 
+            SUM(CASE WHEN e.status = 'Approved' THEN e.base_amount ELSE 0 END) as totalSpent,
+            SUM(CASE WHEN e.status = 'Pending' THEN e.base_amount ELSE 0 END) as totalPending,
+            SUM(CASE WHEN e.status = 'Rejected' THEN e.base_amount ELSE 0 END) as totalRejected,
+            COUNT(*) as totalCount
+          FROM expenses e
+          JOIN users u ON e.employee_id = u.id
+          WHERE u.company_id = ?
+        `, [companyId]) as any[];
+        stats = rows[0];
+      }
+      
+      if (stats) {
+        stats.totalSpent = Number(stats.totalSpent || 0);
+        stats.totalPending = Number(stats.totalPending || 0);
+        stats.totalRejected = Number(stats.totalRejected || 0);
+        stats.totalCount = Number(stats.totalCount || 0);
+      }
+      
+      res.json(stats || { totalSpent: 0, totalPending: 0, totalRejected: 0, totalCount: 0 });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
-  app.post("/api/approvals/action", (req, res) => {
+  app.get("/api/approvals/pending", async (req, res) => {
+    try {
+      const [expenses]: any[] = await pool.execute(`
+        SELECT e.*, u.name as employeeName 
+        FROM expenses e 
+        JOIN users u ON e.employee_id = u.id 
+        WHERE e.status = 'Pending'
+      `);
+      res.json(expenses.map(mapExpense));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/approvals/action", async (req, res) => {
     const { expenseId, userId, role, action, comment } = req.body;
     const date = new Date().toISOString().split('T')[0];
     const logId = `l-${Date.now()}`;
     
-    db.prepare(`
-      INSERT INTO approval_logs (id, expense_id, approver_id, role, status, comment, date)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(logId, expenseId, userId, role, action === 'approve' ? 'Approved' : 'Rejected', comment, date);
+    try {
+      await pool.execute(
+        "INSERT INTO approval_logs (id, expense_id, approver_id, role, status, comment, date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [logId, expenseId, userId, role, action === 'approve' ? 'Approved' : 'Rejected', comment, date]
+      );
 
-    if (action === 'reject') {
-      db.prepare("UPDATE expenses SET status = 'Rejected' WHERE id = ?").run(expenseId);
-    } else {
-      // Logic for multi-step: increment step or mark as approved if last step
-      const expense = db.prepare("SELECT * FROM expenses WHERE id = ?").get() as any;
-      const rule = db.prepare("SELECT * FROM approval_rules WHERE company_id = 'comp-1'").get() as any;
-      const steps = JSON.parse(rule.steps_json);
-      
-      if (expense.current_step >= steps.length - 1) {
-        db.prepare("UPDATE expenses SET status = 'Approved' WHERE id = ?").run(expenseId);
+      if (action === 'reject') {
+        await pool.execute("UPDATE expenses SET status = 'Rejected' WHERE id = ?", [expenseId]);
       } else {
-        db.prepare("UPDATE expenses SET current_step = current_step + 1 WHERE id = ?").run(expenseId);
+        const [expenses] = await pool.execute("SELECT * FROM expenses WHERE id = ?", [expenseId]) as any[];
+        const expense = expenses[0];
+        const [rules] = await pool.execute("SELECT * FROM approval_rules WHERE company_id = ?", ['comp-1']) as any[];
+        const rule = rules[0];
+        const steps = typeof rule.steps_json === 'string' ? JSON.parse(rule.steps_json).steps : rule.steps_json.steps;
+        
+        if (expense.current_step >= steps.length - 1) {
+          await pool.execute("UPDATE expenses SET status = 'Approved' WHERE id = ?", [expenseId]);
+        } else {
+          await pool.execute("UPDATE expenses SET current_step = current_step + 1 WHERE id = ?", [expenseId]);
+        }
       }
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
-    res.json({ success: true });
+  });
+
+  app.post("/api/users/:id/promote", async (req, res) => {
+    const { id } = req.params;
+    try {
+      await pool.execute("UPDATE users SET role = 'Manager' WHERE id = ?", [id]);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/users/:id/assign-director", async (req, res) => {
+    const { id } = req.params;
+    const { directorId } = req.body;
+    try {
+      await pool.execute("UPDATE users SET manager_id = ? WHERE id = ?", [directorId, id]);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put("/api/company/:id", async (req, res) => {
+    const { id } = req.params;
+    const { name, country, defaultCurrency } = req.body;
+    try {
+      await pool.execute(
+        "UPDATE companies SET name = ?, country = ?, default_currency = ? WHERE id = ?",
+        [name, country, defaultCurrency, id]
+      );
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
   // Vite middleware for development
