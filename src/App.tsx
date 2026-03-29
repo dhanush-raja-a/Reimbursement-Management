@@ -42,7 +42,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { format, subDays, startOfMonth, endOfMonth, eachDayOfInterval } from 'date-fns';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { GoogleGenAI } from "@google/genai";
+
 import { 
   AreaChart, 
   Area, 
@@ -591,7 +591,7 @@ const Card = ({ children, className, ...props }: { children: React.ReactNode, cl
 
 // --- Main App ---
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -854,39 +854,42 @@ export default function App() {
   const handleOCR = async (file: File) => {
     setIsScanning(true);
     try {
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const base64 = reader.result as string;
-        const base64Data = base64.split(",")[1];
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const base64 = reader.result as string;
+          resolve(base64.split(",")[1]);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
 
-        const response = await fetch('/api/ocr', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            base64Image: base64Data,
-            mimeType: file.type,
-            fileName: file.name
-          })
-        });
+      const response = await fetch('/api/ocr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base64Image: base64Data,
+          mimeType: file.type,
+          fileName: file.name
+        })
+      });
 
-        if (!response.ok) {
-          throw new Error(`OCR request failed: ${response.statusText}`);
-        }
+      if (!response.ok) {
+        throw new Error(`OCR request failed: ${response.statusText}`);
+      }
 
-        const data = await response.json();
-        setSubmitForm(prev => ({
-          ...prev,
-          amount: data.amount?.toString() || prev.amount,
-          currency: data.currency || prev.currency,
-          category: data.category || prev.category,
-          date: data.date || prev.date,
-          description: data.description || prev.description
-        }));
-      };
-      reader.readAsDataURL(file);
-    } catch (error) {
+      const data = await response.json();
+      setSubmitForm(prev => ({
+        ...prev,
+        amount: data.amount?.toString() || prev.amount,
+        currency: data.currency || prev.currency,
+        category: data.category || prev.category,
+        date: data.date || prev.date,
+        description: data.description || prev.description
+      }));
+    } catch (error: any) {
       console.error("OCR failed:", error);
-      alert("Failed to process receipt. Please enter details manually.");
+      alert(`OCR Failed: ${error.message || "Unknown error"}. Please make sure your server is running and your image is within size limits (free tier is usually < 1MB).`);
     } finally {
       setIsScanning(false);
     }
@@ -2314,10 +2317,10 @@ export default function App() {
                       <div className="p-4 bg-indigo-50 rounded-xl border border-indigo-100">
                         <div className="flex items-center gap-3 text-indigo-700 mb-2">
                           <Scan size={18} />
-                          <span className="font-bold text-sm">AI Smart Scan</span>
+                          <span className="font-bold text-sm">OCR Smart Scan</span>
                         </div>
                         <p className="text-xs text-indigo-600 leading-relaxed">
-                          Upload a receipt and our AI will automatically extract the amount, date, and category for you.
+                          Upload a receipt and our OCR system will automatically extract the amount, date, and merchant for you.
                         </p>
                       </div>
                       {isScanning && (
@@ -2332,7 +2335,7 @@ export default function App() {
                           >
                             <Clock size={18} />
                           </motion.div>
-                          <span className="font-bold text-sm">Gemini is analyzing your receipt...</span>
+                          <span className="font-bold text-sm">OCR Space is analyzing your receipt...</span>
                         </motion.div>
                       )}
                     </div>
